@@ -3,6 +3,7 @@ import os
 import threading
 
 from log.log import Log
+from util.app_path import config_dir
 
 answer_lib_logger = Log('answer_lib')
 
@@ -12,7 +13,7 @@ _lib = None
 
 
 def _lib_path():
-    return os.path.join(os.getcwd(), 'config', LIB_FILE)
+    return os.path.join(config_dir(), LIB_FILE)
 
 
 def load_lib(force=False):
