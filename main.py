@@ -3,6 +3,8 @@ import random
 import sys
 import time
 
+import requests
+
 # 确保当前虚拟环境的 bin 目录在 PATH 中，方便子进程寻找 mitmdump 等工具
 _venv_bin = os.path.dirname(sys.executable)
 if _venv_bin and _venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
@@ -150,6 +152,18 @@ class TaskWorker(QThread):
                 public_info.task_id = task_info['task_id']
                 self.class_task_answer()
 
+    def _answer_question(self, public_info, mode):
+        """单题异常不打断任务: 网络错误上抛交给任务级重试, 数据/解析错误跳过当前题"""
+        try:
+            return answer(public_info, mode)
+        except SecurityVerifyError:
+            raise
+        except requests.exceptions.RequestException:
+            raise
+        except Exception as e:
+            main.logger.error(f"答题异常，跳过当前题：{e}", exc_info=True)
+            return None
+
     def emit_progress(self):
         """
         发送答题进度
@@ -187,7 +201,7 @@ class TaskWorker(QThread):
                 jump_read(public_info)
                 self.emit_progress()
                 continue
-            option = answer(public_info, mode)
+            option = self._answer_question(public_info, mode)
             if option is None:
                 public_info.topic_code = public_info.exam['topic_code']
                 public_info.skip_count += 1
@@ -242,7 +256,7 @@ class TaskWorker(QThread):
                 jump_read(public_info)
                 self.emit_progress()
                 continue
-            option = answer(public_info, mode)
+            option = self._answer_question(public_info, mode)
             if option is None:
                 public_info.topic_code = public_info.exam['topic_code']
                 public_info.skip_count += 1
