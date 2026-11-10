@@ -172,6 +172,16 @@ class TaskWorker(QThread):
                 main.logger.error(f"答题异常，跳过当前题：{e}", exc_info=True)
             return None
 
+    def _pacing_delay(self, public_info):
+        """题间随机节奏, 偶尔加入长停顿, 避免固定间隔"""
+        lo, hi = public_info.min_time, public_info.max_time
+        if hi <= 0:
+            return
+        delay = random.uniform(min(lo, hi), max(lo, hi))
+        if random.random() < 0.03:
+            delay += random.uniform(2.0, 5.0)
+        time.sleep(delay)
+
     def emit_progress(self):
         """
         发送答题进度
@@ -217,7 +227,7 @@ class TaskWorker(QThread):
             else:
                 submit(public_info, option)
             self.emit_progress()
-            time.sleep(random.randint(public_info.min_time, public_info.max_time))
+            self._pacing_delay(public_info)
 
     def complete_practice(self, unit: str, progress: int, task_id=None):
         main.logger.info(f"获取该{unit}单元的单词")
@@ -272,7 +282,7 @@ class TaskWorker(QThread):
             else:
                 submit(public_info, option)
             self.emit_progress()
-            time.sleep(random.randint(public_info.min_time, public_info.max_time))
+            self._pacing_delay(public_info)
 
 
 if __name__ == '__main__':
