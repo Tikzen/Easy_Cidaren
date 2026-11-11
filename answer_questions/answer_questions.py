@@ -70,6 +70,7 @@ def _build_phrase_answer(public_info, phrase: str):
     opt_map = _option_map(public_info)
     if not opt_map:
         return delete_other_char(phrase)
+    max_option_words = max(len(option.split()) for option in opt_map)
     # 选项段聚合: 短语词序从左到右——优先多词选项段(最长优先, 'all our'/'the country'/'a New Era' 整段占一空位),
     # 再 1 词匹配(原词优先, 其次去标点 'struggle,'->'struggle', 斜杠备选 'in/at' 取选项中存在的一支);
     # 未命中视为固定词跳过; 连字符词不在 options 但其拆分词都在 options(waste/free)时保留整体
@@ -79,7 +80,7 @@ def _build_phrase_answer(public_info, phrase: str):
     while i < len(tokens):
         w = tokens[i]
         matched = False
-        for k in range(3, 1, -1):
+        for k in range(max_option_words, 1, -1):
             if i + k <= len(tokens):
                 seg = ' '.join(tokens[i:i + k])
                 seg_key = _norm_option(seg)
@@ -128,7 +129,7 @@ def _build_phrase_answer(public_info, phrase: str):
                     continue
             result.append(w)
             ci += 1
-        if len(result) == slot_words:
+        if len(result) == slot_words and ci == len(cand):
             picked = result
         else:
             # 词位对不上: 连字符拆分后再对齐, 仍不匹配则不提交
@@ -296,15 +297,19 @@ def _memory_choice_index(public_info, mode):
     answers = lookup_wrong(mode, stem.get('content'), stem.get('remark'))
     if not answers:
         return None
-    options = [o.get('content') for o in (public_info.exam.get('options') or []) if isinstance(o, dict)]
+    options = [o.get('content') if isinstance(o, dict) else None
+               for o in (public_info.exam.get('options') or [])]
     keys = [norm_key(o) for o in options]
     answer_keys = [norm_key(a) for a in answers if norm_key(a)]
     # 精确匹配优先
-    for answer_key in answer_keys:
-        for index, option_key in enumerate(keys):
-            if option_key and option_key == answer_key:
-                query_answer.logger.info(f"错题记忆命中: {options[index]}")
-                return index
+    exact_hits = {index for index, option_key in enumerate(keys)
+                  if option_key and option_key in answer_keys}
+    if len(exact_hits) == 1:
+        index = exact_hits.pop()
+        query_answer.logger.info(f"错题记忆命中: {options[index]}")
+        return index
+    if exact_hits:
+        return None
     # 宽松包含匹配仅在唯一命中时采用
     hits = []
     for answer_key in answer_keys:
@@ -391,12 +396,26 @@ def together_word(public_info) -> dict:
 
 
 # complete a sentence
+def _sentence_option_answer(option, word):
+    """按选项类型编码答案; 字符串标签需拼接词形下标。"""
+    tag = option.get('answer_tag')
+    if isinstance(tag, str):
+        sub_options = option.get('sub_options') or []
+        for sub_option in sub_options:
+            if word is None or norm_text(sub_option.get('content')) == norm_text(word):
+                return tag + str(sub_option['answer_tag'])
+        return None if sub_options else tag + '0'
+    return tag
+
+
 def full_sentence(public_info) -> int or str:
     query_answer.logger.info("选择最合适的单词完成句子")
     memory_index = _memory_choice_index(public_info, public_info.exam.get('topic_mode'))
     if memory_index is not None:
         option = public_info.exam['options'][memory_index]
-        return option.get('answer_tag')
+        encoded = _sentence_option_answer(option, option.get('content'))
+        if encoded is not None:
+            return encoded
     options = filler_option(public_info)
     # 单词库命中优先(mode 42: answer_corrects 下标对应的正确答案单词)
     remark = public_info.exam.get('stem', {}).get('remark') if isinstance(public_info.exam, dict) else None
@@ -413,7 +432,9 @@ def full_sentence(public_info) -> int or str:
         for option in public_info.exam['options']:
             if isinstance(option, dict) and option.get('content', '').lower() in lower_words:
                 query_answer.logger.info(f"单词库命中,提交{option.get('content')}(tag={option.get('answer_tag')})")
-                return option.get('answer_tag')
+                encoded = _sentence_option_answer(option, option.get('content'))
+                if encoded is not None:
+                    return encoded
     # word in examples sentence
     word = word_examples(public_info, options)
     # extract answer tag
@@ -433,7 +454,7 @@ def full_sentence(public_info) -> int or str:
                 return option_word
     query_answer.logger.error("补全句子失败,猜第3个选项")
     # submit 1#0,0#2 or 1 应该分开写提升正确率
-    return public_info.exam['options'][2]['answer_tag']
+    return _sentence_option_answer(public_info.exam['options'][2], None)
 
 
 # full word
@@ -515,6 +536,18 @@ def complete_spelling(public_info):
     # 题干固定词(如 {gr}{sto} 前的 green、Lucid waters 中的 Lucid、and 等), 前缀匹配时排除,
     # 避免误把固定词当空位答案(green->gr、and->a、Lucid->lu)
     fixed = set(w.lower() for w in re.findall(r'[A-Za-z]+', re.sub(r'\{[^}]*\}', ' ', content)))
+    # 服务端返回的是按空位排序的单词, 保留顺序和连字符, 优先于共享答案库。
+    mem_answers = lookup_wrong(73, content, remark)
+    slot_count = len(tips) if tips else content.count('{}')
+    if mem_answers and slot_count and len(mem_answers) == slot_count:
+        matches = all(
+            (not tips or word.lower().startswith(tips[i].lower()))
+            and (i >= len(word_lens) or not word_lens[i] or len(word) == int(word_lens[i]))
+            for i, word in enumerate(mem_answers)
+        )
+        if matches:
+            query_answer.logger.info(f"错题记忆命中,补全拼写结果:{mem_answers}")
+            return json.dumps(mem_answers)
     if not tips:
         # 无前缀空位题({}): 候选单词 ∩ 题目 options(答案单词池) 直接提交
         slot_count = content.count('{}')
@@ -537,14 +570,6 @@ def complete_spelling(public_info):
         answers = _match_tips_words(tips, word_lens, words, exclude=fixed)
         if answers:
             query_answer.logger.info(f"答案库命中,补全拼写结果:{answers}")
-            return json.dumps(answers)
-    # 1.1 错题记忆命中(带题目上下文的标准答案)
-    mem_answers = lookup_wrong(73, content, remark)
-    if mem_answers:
-        words = [w for a in mem_answers for w in re.split(r'[\s\-(),/]+', a) if w]
-        answers = _match_tips_words(tips, word_lens, words, exclude=fixed)
-        if answers:
-            query_answer.logger.info(f"错题记忆命中,补全拼写结果:{answers}")
             return json.dumps(answers)
     # 2. 单词库命中(同义变体,如 {sup}->supervision; 由 mode 42 提交后捕获)
     word_answers = lookup_word(remark)
@@ -636,10 +661,10 @@ def guess_answer(public_info, mode):
     exam = public_info.exam
     if not isinstance(exam, dict):
         return None
-    options = exam.get('options') or []
-    contents = [o.get('content') for o in options if isinstance(o, dict)]
-    n = len(options)
     try:
+        options = exam.get('options') or []
+        contents = [o.get('content') for o in options if isinstance(o, dict)]
+        n = len(options)
         if mode in (11, 15, 16, 17, 18, 21, 22):
             return random.randrange(n) if n else None
         if mode == 13:
@@ -664,13 +689,7 @@ def guess_answer(public_info, mode):
             if not options:
                 return None
             option = options[2] if n >= 3 else options[0]
-            tag = option.get('answer_tag')
-            if isinstance(tag, str):
-                sub_options = option.get('sub_options') or []
-                if sub_options:
-                    return tag + str(sub_options[0].get('answer_tag', 0))
-                return tag + '0'
-            return tag
+            return _sentence_option_answer(option, None)
         if mode in (51, 52, 53, 54):
             w_lens = exam.get('w_lens') or []
             w_len = int(w_lens[0]) if w_lens else 0

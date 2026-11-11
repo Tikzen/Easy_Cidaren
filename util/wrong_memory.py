@@ -5,7 +5,7 @@ import time
 
 from log.log import Log
 from util.app_path import config_dir
-from util.text_norm import norm_key
+from util.text_norm import norm_key, norm_text
 
 MEM_FILE = 'wrong_memory.json'
 _lock = threading.Lock()
@@ -19,7 +19,8 @@ def _mem_path():
 
 
 def _key(mode, content, remark):
-    return f"{mode}|{norm_key(content)}|{norm_key(remark)}"
+    # 保留空位、连字符和标点, 防止不同填空位置/词形的题目共用答案。
+    return json.dumps([mode, norm_text(content), norm_text(remark)], ensure_ascii=False)
 
 
 def load_memory(force=False):
@@ -41,7 +42,14 @@ def load_memory(force=False):
 
 def lookup(mode, content, remark):
     """按 题型+题干+中文释义 查错题记忆, 返回标准答案内容列表或 None"""
-    entry = load_memory().get(_key(mode, content, remark))
+    memory = load_memory()
+    key = _key(mode, content, remark)
+    entry = memory.get(key)
+    if entry is None:
+        # 兼容旧格式, 但必须核对记录内的完整题干, 避免复用碰撞键下的其他题目。
+        legacy = memory.get(f"{mode}|{norm_key(content)}|{norm_key(remark)}")
+        if isinstance(legacy, dict) and _key(legacy.get('mode'), legacy.get('content'), legacy.get('remark')) == key:
+            entry = legacy
     if not isinstance(entry, dict):
         return None
     answers = entry.get('answers')
